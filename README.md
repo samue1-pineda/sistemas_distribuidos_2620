@@ -221,13 +221,6 @@ los datos de ejemplo hay que borrarlos). El frontend usa rutas relativas `/api/.
 con cualquier dominio, con o sin HTTPS. Los endpoints `/api/chaos/*` y `/api/replication/*` requieren
 sesión de administrador.
 
-## Comandos de Claude Code
-
-| Comando | Qué hace |
-|---------|----------|
-| `/verify-cluster [puerto]` | Levanta el clúster y valida Round-Robin, caída de nodo, failover de BD y fallos reales |
-| `/run-qa [--cluster]` | Ejecuta pytest y redacta `docs/03_informe_pruebas.md` con la salida real |
-| `/generate-docs [tecnico\|usuario\|todo]` | Regenera los manuales a partir del código |
 
 ## Documentación
 
