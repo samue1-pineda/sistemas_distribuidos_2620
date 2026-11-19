@@ -14,11 +14,11 @@ function DbChip({ dbUsed }) {
   return <span className={`db-chip ${dbUsed === "primary" ? "db-primary" : "db-failover"}`}>{dbLabel(dbUsed)}</span>;
 }
 
-function LastRequestCard({ meta }) {
+export function LastRequestCard({ meta }) {
   const attempts = upstreamAttempts(meta?.upstreamStatus);
   const retried = attempts.length > 1;
   return (
-    <article className="card last-request" aria-live="polite">
+    <article className="card last-request" aria-live="polite" data-request-id={meta?.id ?? ""}>
       <header className="card-head">
         <h3>Última petición</h3>
         {meta && <span className="muted mono">{formatClock(meta.at)}</span>}
@@ -64,7 +64,7 @@ function nodeState(node) {
   return { tone: "up", label: "Operativo" };
 }
 
-function NodesCard({ nodes, handled, pending, onToggleNode, onTestBalancing, balance }) {
+export function NodesCard({ nodes, handled, pending, onToggleNode, onTestBalancing, balance }) {
   return (
     <article className="card">
       <header className="card-head">
@@ -125,7 +125,7 @@ function dbState(info) {
   return { tone: "down", label: "Caída (real)" };
 }
 
-function DatabasesCard({ databases, replication, primaryDown, pending, onToggleDb, onSync }) {
+export function DatabasesCard({ databases, replication, primaryDown, pending, onToggleDb, onSync }) {
   const primary = dbState(databases?.primary);
   const replica = dbState(databases?.replica);
   const lastSync = databases?.last_sync;
@@ -186,45 +186,12 @@ export default function ClusterPanel({
   onToggleDb,
   onSync,
   onTestBalancing,
-  isAdmin = true,
 }) {
   const nodes = [...(cluster?.nodes ?? [])].sort((a, b) => (a.node ?? a.url).localeCompare(b.node ?? b.url));
-  if (!isAdmin) {
-    // Vista de cliente: sólo ve cómo el clúster atendió SUS peticiones (sin controles de caos).
-    return (
-      <section className="cluster" aria-labelledby="cluster-title">
-        <div className="section-head">
-          <h2 id="cluster-title">Tu conexión al clúster</h2>
-          <span className="muted">Cada petición la atiende uno de los dos servidores</span>
-        </div>
-        <div className="cluster-grid cluster-grid--client">
-          <LastRequestCard meta={lastRequest} />
-          <article className="card info-card">
-            <header className="card-head">
-              <h3>¿Cómo se protegen tus pedidos?</h3>
-            </header>
-            <ul className="info-list">
-              <li>
-                <strong>Dos servidores</strong> (<NodeChip node="Nodo-Alpha-01" /> y <NodeChip node="Nodo-Beta-02" />)
-                se reparten tus peticiones; si uno falla, el otro responde sin que lo notes.
-              </li>
-              <li>
-                <strong>Dos bases de datos:</strong> cada pedido se guarda en la principal y en una copia
-                (<DbChip dbUsed="primary" /> / <DbChip dbUsed="replica_failover" />).
-              </li>
-              <li>
-                <strong>Tu sesión es válida en ambos servidores</strong>: puedes seguir trabajando aunque uno se caiga.
-              </li>
-            </ul>
-          </article>
-        </div>
-      </section>
-    );
-  }
   return (
     <section className="cluster" aria-labelledby="cluster-title">
       <div className="section-head">
-        <h2 id="cluster-title">Estado del clúster</h2>
+        <h2 id="cluster-title">Controles de caos</h2>
         <span className="muted">
           Reportado por {cluster?.reporter ?? "—"} · se actualiza cada 3 s
         </span>

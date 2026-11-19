@@ -1,8 +1,12 @@
 // Prueba E2E de la interfaz contra el clúster real + capturas para el manual de usuario.
 //
+// La interfaz se organiza en secciones (menú lateral, una tarea por sección, ruta en el hash: #/pedidos,
+// #/cluster…). La prueba recorre cada sección como lo haría una persona: navega con los botones del menú.
+//
 // Uso (con el clúster arriba, idealmente recién creado con `docker compose down -v && docker compose up -d --build`):
 //   cd e2e-ui && npm install && node ui-test.mjs [carpeta-de-capturas]
-// Variables: BASE (por defecto http://localhost:8080) y CHROME_PATH (ruta del ejecutable de Chrome/Edge).
+// Variables: BASE (por defecto http://localhost:8080), CHROME_PATH (ruta del ejecutable de Chrome/Edge),
+// UI_ADMIN_USER / UI_ADMIN_PASSWORD (credenciales del administrador) y UI_CPU_THROTTLE (simula una máquina lenta).
 import puppeteer from "puppeteer-core";
 import fs from "node:fs";
 import path from "node:path";
@@ -23,6 +27,8 @@ fs.mkdirSync(OUT, { recursive: true });
 const SEED_CUSTOMERS = ["Distribuidora Andina S.A.S.", "Ferretería El Tornillo", "María Fernanda López"];
 const ADMIN_USER = process.env.UI_ADMIN_USER || "admin";
 const ADMIN_PASSWORD = process.env.UI_ADMIN_PASSWORD || "Admin12345";
+const ADMIN_ROUTES = ["resumen", "pedidos", "nuevo", "cluster", "monitoreo", "usuarios", "correcciones", "auditoria"];
+const CLIENT_ROUTES = ["pedidos", "nuevo", "conexion"];
 
 const results = [];
 const check = (name, ok, extra = "") => {
@@ -54,16 +60,21 @@ page.on("console", (m) => {
   // Aviso del navegador (no de la app): sobre HTTP sin TLS fuera de localhost, Chrome ignora la cabecera
   // Cross-Origin-Opener-Policy. Con HTTPS (Coolify + Traefik) o en localhost sí se aplica.
   if (/Cross-Origin-Opener-Policy header has been ignored/.test(m.text())) return;
-  pageErrors.push(m.text());
+  const url = m.location()?.url;
+  pageErrors.push(url ? `${m.text()} [${url.replace(BASE, "")}]` : m.text());
 });
 
 const shot = async (name, selector, { keepToasts = false } = {}) => {
   const file = path.join(OUT, name);
-  // Captura limpia: barra superior no fija, sin foco en inputs y (opcional) sin toasts.
+  // Captura limpia: barra superior y menú no fijos, sin foco en inputs y (opcional) sin toasts.
   // (Vía CSSOM y no con <style>: la Content-Security-Policy del sitio bloquea estilos en línea.)
   await page.evaluate((keepToasts) => {
     const topbar = document.querySelector(".topbar");
     if (topbar) topbar.style.position = "static";
+    const sidebar = document.querySelector(".sidebar");
+    if (sidebar && getComputedStyle(sidebar).flexDirection === "column") {
+      Object.assign(sidebar.style, { position: "static", height: "auto", alignSelf: "stretch" });
+    }
     document.activeElement?.blur();
     if (!keepToasts) document.querySelectorAll(".toast .icon-btn").forEach((b) => b.click());
     window.scrollTo(0, 0);
@@ -74,6 +85,7 @@ const shot = async (name, selector, { keepToasts = false } = {}) => {
   console.log(`      📸 ${name}`);
 };
 const text = (selector) => page.$eval(selector, (el) => el.textContent.trim()).catch(() => "");
+const exists = async (selector) => Boolean(await page.$(selector));
 const customers = () => page.$$eval("tbody tr .customer", (els) => els.map((e) => e.textContent));
 const waitText = (selector, needle, timeout = 10000) =>
   page.waitForFunction(
@@ -132,6 +144,18 @@ const waitIdle = (label) =>
     label,
   );
 
+// ------------------------------------------------------------------ navegación
+const currentRoute = () => page.$eval("main.content", (m) => m.dataset.route).catch(() => null);
+const navRoutes = () => page.$$eval(".sidebar .nav-item", (els) => els.map((e) => e.dataset.route));
+async function go(route) {
+  await page.click(`.nav-item[data-route="${route}"]`);
+  await page.waitForSelector(`main.content[data-route="${route}"]`, { timeout: 10000 });
+}
+// Número de pedidos que muestra el menú junto a "Pedidos" (se actualiza al crear/eliminar).
+const ordersBadge = () =>
+  page.$eval('.nav-item[data-route="pedidos"] .nav-badge', (b) => Number(b.textContent)).catch(() => 0);
+
+// ------------------------------------------------------------------ pedidos
 async function fillOrder(customer, items) {
   await page.click(".order-form .field input", { clickCount: 3 });
   await page.type(".order-form .field input", customer);
@@ -146,16 +170,49 @@ async function fillOrder(customer, items) {
     await price.type(String(items[i][2]));
   }
 }
-// Envía el formulario y espera a que la tabla tenga una fila más (robusto ante nombres repetidos).
+// Envía el formulario (sección "Nuevo pedido") y espera a que el menú cuente un pedido más y a que
+// el panel "Última petición" muestre la respuesta (robusto ante nombres repetidos).
 async function submitNewOrder() {
-  const before = (await customers()).length;
+  const before = await ordersBadge();
+  const lastId = await page.$eval(".last-request", (el) => el.dataset.requestId).catch(() => "");
   await clickButton("Crear pedido", ".order-form");
-  await page.waitForFunction((n) => document.querySelectorAll("tbody .customer").length > n, { timeout: 10000 }, before);
+  await page.waitForFunction(
+    (n, id) =>
+      Number(document.querySelector('.nav-item[data-route="pedidos"] .nav-badge')?.textContent ?? 0) > n &&
+      document.querySelector(".last-request")?.dataset.requestId !== id,
+    { timeout: 10000 },
+    before,
+    lastId,
+  );
   await waitIdle("Crear pedido");
 }
 async function createOrder(customer, items) {
+  if ((await currentRoute()) !== "nuevo") await go("nuevo");
   await fillOrder(customer, items);
   await submitNewOrder();
+}
+// Se espera al estado esperado (con límite) en lugar de pausas fijas: en CI la red es más lenta.
+async function advanceTo(customer, button, expected) {
+  await page.waitForFunction(
+    (c, b) => [...document.querySelectorAll("tbody tr")].some((r) =>
+      r.querySelector(".customer")?.textContent === c &&
+      [...r.querySelectorAll("button")].some((x) => x.textContent.includes(b) && !x.disabled)),
+    { timeout: 10000 }, customer, button,
+  );
+  await clickInRow(customer, button);
+  await page
+    .waitForFunction(
+      (c, e) => [...document.querySelectorAll("tbody tr")].find((r) => r.querySelector(".customer")?.textContent === c)
+        ?.querySelector(".status")?.textContent === e,
+      { timeout: 10000 }, customer, expected,
+    )
+    .catch(() => {});
+  return (await rowStatus(customer)) === expected;
+}
+async function deleteRow(name) {
+  await clickInRow(name, "Eliminar");
+  await clickInRow(name, "¿Confirmar?");
+  await page.waitForFunction((n) => ![...document.querySelectorAll("tbody .customer")].some((e) => e.textContent === n), { timeout: 8000 }, name);
 }
 
 async function fillLogin(username, password) {
@@ -170,10 +227,13 @@ async function fillLogin(username, password) {
 try {
   // ------------------------------------------------------------------ inicio de sesión
   await page.goto(BASE, { waitUntil: "networkidle0" });
-  await page.evaluate(() => localStorage.clear());
+  await page.evaluate(() => {
+    localStorage.clear();
+    window.location.hash = "";
+  });
   await page.reload({ waitUntil: "networkidle0" });
   await page.waitForSelector(".login-card");
-  check("Sin sesión se muestra la pantalla de inicio de sesión", Boolean(await page.$(".login-card")));
+  check("Sin sesión se muestra la pantalla de inicio de sesión", await exists(".login-card"));
   await shot("00_inicio_sesion.png");
   expectedUnauthorized = 1;
   await fillLogin(ADMIN_USER, "contraseña-incorrecta-1");
@@ -185,20 +245,47 @@ try {
   await page.waitForSelector(".role-badge");
   check("Login de administrador abre el panel completo", (await text(".role-badge")) === "Administrador");
 
-  // ------------------------------------------------------------------ carga inicial
-  await page.waitForSelector("tbody .customer");
-  await sleep(3500); // primer ciclo de polling del clúster
-  const initial = await customers();
-  check("Carga los 3 pedidos de ejemplo de init.sql", SEED_CUSTOMERS.every((c) => initial.includes(c)), initial.join(" | "));
-  const tiles = await page.$$eval(".tile", (els) => els.map((e) => e.textContent));
+  // ------------------------------------------------------------------ menú y sección Resumen
+  await page.waitForSelector("main.content");
+  check("El administrador entra a la sección Resumen", (await currentRoute()) === "resumen");
+  const adminNav = await navRoutes();
+  check("Menú del administrador: una sección por tarea", JSON.stringify(adminNav) === JSON.stringify(ADMIN_ROUTES), adminNav.join(", "));
   check(
-    "Panel muestra ambos nodos operativos",
-    tiles.some((t) => t.includes("Nodo-Alpha-01") && t.includes("Operativo")) &&
-      tiles.some((t) => t.includes("Nodo-Beta-02") && t.includes("Operativo")),
+    "El menú marca la sección actual (aria-current) y la refleja en la URL",
+    (await page.$eval('.nav-item[aria-current="page"]', (b) => b.dataset.route)) === "resumen" &&
+      (await page.evaluate(() => window.location.hash)) === "#/resumen",
   );
-  check("Panel muestra db-primary y db-replica operativas", tiles.filter((t) => t.includes("db-") && t.includes("Operativa")).length === 2);
+  await page.waitForFunction(
+    () => [...document.querySelectorAll(".stat-tile")].some((t) => t.textContent.includes("Nodos operativos") && t.textContent.includes("2 / 2")),
+    { timeout: 15000 },
+  );
+  check("Resumen: indicador de nodos operativos (2 / 2)", true);
+  const summaryTiles = await page.$$eval(".stat-tile", (els) => els.map((e) => e.textContent));
+  check("Resumen: base primaria operativa", summaryTiles.some((t) => t.includes("Base de datos primaria") && t.includes("Operativa")));
+  await page.waitForSelector('.topo-node[data-node="alpha"].topo-up', { timeout: 10000 });
+  check(
+    "Resumen: la topología dibuja gateway, ambos nodos y ambas bases operativas",
+    (await exists('.topo-node[data-node="gateway"]')) &&
+      (await exists('.topo-node[data-node="beta"].topo-up')) &&
+      (await exists('.topo-node[data-node="primary"].topo-up')) &&
+      (await exists('.topo-node[data-node="replica"].topo-up')),
+  );
+  check("Resumen: no mezcla formularios ni tablas de otras secciones", !(await exists(".order-form")) && !(await exists("table")));
+  await sleep(1500);
+  await shot("01_dashboard.png");
 
-  // ------------------------------------------------------------------ crear pedidos con el formulario
+  // ------------------------------------------------------------------ sección Pedidos
+  await go("pedidos");
+  await page.waitForSelector("tbody .customer");
+  const initial = await customers();
+  check("Pedidos: carga los 3 pedidos de ejemplo de init.sql", SEED_CUSTOMERS.every((c) => initial.includes(c)), initial.join(" | "));
+  check("Pedidos: la sección sólo muestra la tabla (sin formulario ni controles de caos)", !(await exists(".order-form")) && !(await exists(".cluster")));
+  const badgeStart = await ordersBadge();
+
+  // ------------------------------------------------------------------ sección Nuevo pedido
+  await clickButton("Nuevo pedido", ".page-header");
+  await page.waitForSelector('main.content[data-route="nuevo"]');
+  check("El botón 'Nuevo pedido' de la cabecera lleva a su sección", true);
   await fillOrder("Logística Express S.A.S.", [
     ["Caja corrugada 60x40", 20, 4.75],
     ["Film stretch 50 cm", 5, 12.9],
@@ -206,33 +293,17 @@ try {
   check("Formulario calcula el total estimado (20×4,75 + 5×12,90)", (await text(".form-total strong")) === "$ 159,50", await text(".form-total strong"));
   await shot("02_formulario_nuevo_pedido.png", ".order-form");
   await submitNewOrder();
-  check("Crear pedido: aparece en la tabla como Pendiente", (await rowStatus("Logística Express S.A.S.")) === "Pendiente");
   const lastNode = await text(".last-request .node-chip");
-  check("Panel 'Última petición' muestra el nodo que atendió", /Nodo-(Alpha-01|Beta-02)/.test(lastNode), lastNode);
-  check("Panel 'Última petición' muestra BD Primary", (await text(".last-request .db-chip")) === "Primary");
-
+  check("Nuevo pedido: 'Última petición' muestra el nodo que atendió", /Nodo-(Alpha-01|Beta-02)/.test(lastNode), lastNode);
+  check("Nuevo pedido: 'Última petición' muestra BD Primary", (await text(".last-request .db-chip")) === "Primary");
   await createOrder("Supermercado La Economía", [["Arroz 5 kg", 12, 8.4]]);
   await createOrder("Clínica San Rafael", [["Guantes de nitrilo (caja)", 30, 6.2]]);
+  check("El menú cuenta los pedidos creados (+3)", (await ordersBadge()) === badgeStart + 3, `${badgeStart} → ${await ordersBadge()}`);
 
   // ------------------------------------------------------------------ cambio de estado
-  // Se espera al estado esperado (con límite) en lugar de pausas fijas: en CI la red es más lenta.
-  const advanceTo = async (customer, button, expected) => {
-    await page.waitForFunction(
-      (c, b) => [...document.querySelectorAll("tbody tr")].some((r) =>
-        r.querySelector(".customer")?.textContent === c &&
-        [...r.querySelectorAll("button")].some((x) => x.textContent.includes(b) && !x.disabled)),
-      { timeout: 10000 }, customer, button,
-    );
-    await clickInRow(customer, button);
-    await page
-      .waitForFunction(
-        (c, e) => [...document.querySelectorAll("tbody tr")].find((r) => r.querySelector(".customer")?.textContent === c)
-          ?.querySelector(".status")?.textContent === e,
-        { timeout: 10000 }, customer, expected,
-      )
-      .catch(() => {});
-    return (await rowStatus(customer)) === expected;
-  };
+  await go("pedidos");
+  await page.waitForFunction(() => [...document.querySelectorAll("tbody .customer")].some((e) => e.textContent === "Clínica San Rafael"), { timeout: 10000 });
+  check("Pedido creado aparece en la tabla como Pendiente", (await rowStatus("Logística Express S.A.S.")) === "Pendiente");
   check("Avanzar estado: pendiente → en proceso", await advanceTo("Supermercado La Economía", "→ En proceso", "En proceso"));
   await advanceTo("Logística Express S.A.S.", "→ En proceso", "En proceso");
   check("Avanzar estado: en proceso → enviado", await advanceTo("Logística Express S.A.S.", "→ Enviado", "Enviado"));
@@ -240,7 +311,8 @@ try {
 
   // Regresión: una recarga de la lista que leyó la BD ANTES de un cambio y responde DESPUÉS no debe
   // devolver el pedido a su estado anterior (defecto encontrado en CI). Se retrasa a propósito la
-  // respuesta del GET de la lista con el protocolo de depuración de Chrome.
+  // respuesta de los GET de la lista con el protocolo de depuración de Chrome: quedan en vuelo la
+  // recarga que sigue a "Crear pedido" y la que dispara entrar a la sección Pedidos.
   const cdp = await page.createCDPSession();
   await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "*/api/orders*", requestStage: "Response" }] });
   cdp.on("Fetch.requestPaused", async (event) => {
@@ -248,7 +320,8 @@ try {
     await cdp.send("Fetch.continueResponse", { requestId: event.requestId }).catch(() => {});
   });
   await createOrder("Pedido con recarga lenta", [["Cinta", 2, 3]]);
-  await clickInRow("Pedido con recarga lenta", "→ En proceso"); // la recarga silenciosa sigue en vuelo
+  await go("pedidos");
+  await advanceTo("Pedido con recarga lenta", "→ En proceso", "En proceso"); // las recargas lentas siguen en vuelo
   await sleep(2500);
   check(
     "Una recarga lenta de la lista no revierte un cambio de estado",
@@ -258,37 +331,64 @@ try {
   await cdp.send("Fetch.disable");
   await cdp.detach();
   await sleep(300);
-  await clickInRow("Pedido con recarga lenta", "Eliminar");
-  await clickInRow("Pedido con recarga lenta", "¿Confirmar?");
-  await page.waitForFunction(() => ![...document.querySelectorAll("tbody .customer")].some((e) => e.textContent === "Pedido con recarga lenta"), { timeout: 8000 });
+  await deleteRow("Pedido con recarga lenta");
 
-  // ------------------------------------------------------------------ editar
+  // ------------------------------------------------------------------ editar (ventana de diálogo)
   await clickInRow("Clínica San Rafael", "Editar");
-  await waitText(".order-form h3", "Editar pedido");
-  const qty = (await page.$$(".order-form .item-row input"))[1];
+  await page.waitForSelector(".dialog .order-form");
+  check("Editar abre una ventana sobre la tabla (sin cambiar de sección)", (await currentRoute()) === "pedidos");
+  const qty = (await page.$$(".dialog .order-form .item-row input"))[1];
   await qty.click({ clickCount: 3 });
   await qty.type("40");
-  await clickButton("Guardar cambios", ".order-form");
-  await waitText(".order-form h3", "Nuevo pedido");
-  await sleep(500);
+  await clickButton("Guardar cambios", ".dialog");
+  await page.waitForFunction(() => !document.querySelector(".dialog"), { timeout: 10000 });
+  await page
+    .waitForFunction(
+      () => [...document.querySelectorAll("tbody tr")].find((r) => r.textContent.includes("Clínica San Rafael"))?.querySelector("td.num")?.textContent === "$ 248,00",
+      { timeout: 8000 },
+    )
+    .catch(() => {});
   const editedTotal = await page.evaluate(() => {
     const row = [...document.querySelectorAll("tbody tr")].find((r) => r.textContent.includes("Clínica San Rafael"));
     return row?.querySelector("td.num")?.textContent;
   });
   check("Editar pedido pendiente: total recalculado (40×6,20)", editedTotal === "$ 248,00", editedTotal);
 
-  // ------------------------------------------------------------------ balanceo
+  // ------------------------------------------------------------------ filtros y búsqueda
+  await clickButton("En proceso", ".chips");
+  await sleep(300);
+  const filtered = await customers();
+  check("Filtro por estado 'En proceso'", filtered.length > 0 && (await page.$$eval("tbody .status", (els) => els.every((e) => e.textContent === "En proceso"))), filtered.join(" | "));
+  await shot("08_filtros.png", ".orders");
+  await clickButton("Todos", ".chips");
+  await page.type(".search", "clínica");
+  await sleep(300);
+  const searched = await customers();
+  check("Búsqueda por cliente ('clínica')", searched.length >= 1 && searched.every((c) => c === "Clínica San Rafael"), searched.join(" | "));
+  await page.click(".search", { clickCount: 3 });
+  await page.keyboard.press("Backspace");
+
+  // ------------------------------------------------------------------ sección Clúster y caos: balanceo
+  await go("cluster");
+  await page.waitForFunction(() => [...document.querySelectorAll(".tile")].filter((t) => t.textContent.includes("Operativo")).length === 2, { timeout: 10000 });
+  check("Clúster: sección con topología, controles de caos y registro de peticiones", (await exists(".topology")) && (await exists(".cluster")) && (await exists(".log")));
   await clickButton("Probar balanceo");
   await waitIdle("Probar balanceo");
   const cells = await page.$$eval(".balance-cell", (els) => els.map((e) => e.textContent));
   check("Probar balanceo: 6 respuestas repartidas entre α y β", cells.length === 6 && cells.includes("α") && cells.includes("β"), cells.join(""));
+  check("Topología: resalta el camino de la última petición", await exists('.topo-edge.is-path[data-edge="clients-gateway"]'));
   await sleep(3200);
-  await shot("03_estado_cluster_normal.png", ".cluster");
-  await shot("01_dashboard.png");
+  await shot("03_estado_cluster_normal.png");
 
   // ------------------------------------------------------------------ caída de nodo
   check("Clic en 'Simular Caída de Nodo' (Alpha)", await clickInTile("Nodo-Alpha-01", "Simular Caída de Nodo"));
   await waitText(".tile", "Caída simulada (503)");
+  await page.waitForSelector('.topo-node[data-node="alpha"].topo-crash', { timeout: 10000 });
+  check(
+    "Topología: Alpha en rojo y su enlace con el gateway cortado",
+    await exists('.topo-edge.is-down[data-edge="gateway-alpha"]'),
+  );
+  check("El menú avisa con '!' que el clúster está degradado", (await text('.nav-item[data-route="cluster"] .nav-badge')) === "!");
   await clickButton("Probar balanceo");
   await waitIdle("Probar balanceo");
   const cellsDown = await page.$$eval(".balance-cell", (els) => els.map((e) => e.textContent));
@@ -297,22 +397,26 @@ try {
   check("El registro evidencia el reintento de NGINX (503 → 200)", retries.some((r) => r.includes("503") && r.includes("200")), retries.join(" | "));
   await createOrder("Pedido con nodo caído", [["Etiqueta térmica", 100, 0.15]]);
   check("Crear pedido con un nodo caído funciona (lo atiende Beta)", (await text(".last-request .node-chip")) === "Nodo-Beta-02");
+  await go("cluster");
   await sleep(3200);
-  await shot("04_caida_de_nodo.png", ".cluster");
+  await shot("04_caida_de_nodo.png");
   await shot("05_registro_peticiones_failover.png", ".log");
   check("Clic en 'Restaurar nodo'", await clickInTile("Nodo-Alpha-01", "Restaurar nodo"));
   await page.waitForFunction(() => [...document.querySelectorAll(".tile")].filter((t) => t.textContent.includes("Operativo")).length === 2, { timeout: 10000 });
-  check("Nodo Alpha vuelve a Operativo", true);
+  await page.waitForSelector('.topo-node[data-node="alpha"].topo-up', { timeout: 10000 });
+  check("Nodo Alpha vuelve a Operativo (también en la topología)", true);
 
   // ------------------------------------------------------------------ caída de BD primaria
   await clickButton("Simular Caída de BD Primaria");
   await waitText(".tile", "Caída simulada");
+  await page.waitForFunction(() => document.querySelectorAll('.topo-edge.is-failover[data-edge$="-replica"]').length === 2, { timeout: 10000 });
+  check("Topología: con db-primary caída, los nodos apuntan a la réplica", await exists('.topo-node[data-node="primary"].topo-simulated_down'));
   await createOrder("Pedido con BD primaria caída", [["Pallet de madera", 4, 18]]);
   check("Con db-primary caída, el pedido se guarda en 'Replica Failover'", (await text(".last-request .db-chip")) === "Replica Failover");
   check("Se muestra el aviso de failover de BD", (await text(".last-request .callout-amber")).includes("db-replica"));
-  await clickButton("Refrescar");
-  await sleep(800);
-  await sleep(3000);
+  await go("cluster");
+  check("Topología: el último recorrido termina en db-replica", await exists('.topo-edge.is-path[data-edge$="-replica"]'));
+  await sleep(3200);
   await shot("06_failover_bd_primaria.png");
 
   await clickButton("Restaurar BD Primaria");
@@ -327,8 +431,11 @@ try {
   check("Panel indica 'Réplica en sincronía'", true);
   await shot("07_reconciliacion.png", ".cluster");
 
-  // ------------------------------------------------------------------ monitoreo (admin)
-  await clickButton("Monitoreo", ".tabs");
+  // ------------------------------------------------------------------ sección Monitoreo (desde los accesos rápidos)
+  await go("resumen");
+  await clickButton("Monitoreo", ".shortcuts");
+  await page.waitForSelector('main.content[data-route="monitoreo"]');
+  check("Los accesos rápidos del Resumen llevan a su sección", true);
   await page.waitForFunction(() => document.querySelectorAll(".node-card").length >= 2, { timeout: 15000 });
   await sleep(3500); // un ciclo de actualización
   const nodeCards = await page.$$eval(".node-card", (els) => els.map((e) => e.textContent));
@@ -358,28 +465,11 @@ try {
   const tableRows = await page.$$eval(".chart-table tbody tr", (rows) => rows.length);
   check("Monitoreo: cada gráfico tiene vista de tabla", tableRows >= 30, `${tableRows} filas`);
   await clickButton("Ver gráfico", ".chart-card");
-  await clickButton("Operación", ".tabs");
-  await page.waitForSelector(".order-form");
 
-  // ------------------------------------------------------------------ filtros, búsqueda y eliminación
-  await clickButton("En proceso", ".chips");
-  await sleep(300);
-  const filtered = await customers();
-  check("Filtro por estado 'En proceso'", filtered.length > 0 && (await page.$$eval("tbody .status", (els) => els.every((e) => e.textContent === "En proceso"))), filtered.join(" | "));
-  await shot("08_filtros.png", ".orders");
-  await clickButton("Todos", ".chips");
-  await page.type(".search", "clínica");
-  await sleep(300);
-  const searched = await customers();
-  check("Búsqueda por cliente ('clínica')", searched.length >= 1 && searched.every((c) => c === "Clínica San Rafael"), searched.join(" | "));
-  await page.click(".search", { clickCount: 3 });
-  await page.keyboard.press("Backspace");
-
-  for (const name of ["Pedido con nodo caído", "Pedido con BD primaria caída"]) {
-    await clickInRow(name, "Eliminar");
-    await clickInRow(name, "¿Confirmar?");
-    await page.waitForFunction((n) => ![...document.querySelectorAll("tbody .customer")].some((e) => e.textContent === n), { timeout: 8000 }, name);
-  }
+  // ------------------------------------------------------------------ eliminación
+  await go("pedidos");
+  await page.waitForSelector("tbody .customer");
+  for (const name of ["Pedido con nodo caído", "Pedido con BD primaria caída"]) await deleteRow(name);
   check("Eliminar pedidos con confirmación en dos pasos", !(await customers()).some((c) => c.startsWith("Pedido con")));
 
   // ------------------------------------------------------------------ cliente (rol user)
@@ -396,46 +486,75 @@ try {
   await page.click(".login-card button[type=submit]");
   await page.waitForSelector(".role-badge");
   check("Registro de cliente inicia sesión con rol Cliente", (await text(".role-badge")) === "Cliente");
-  await page.waitForFunction(() => document.querySelector("#orders-title")?.textContent === "Mis pedidos");
+  await page.waitForSelector('main.content[data-route="pedidos"]');
+  await page.waitForFunction(() => document.querySelector("#orders-title")?.textContent === "Tus pedidos");
+  const clientNav = await navRoutes();
+  check("Menú del cliente: sólo sus pedidos, nuevo pedido y su conexión", JSON.stringify(clientNav) === JSON.stringify(CLIENT_ROUTES), clientNav.join(", "));
   check("El cliente no ve los pedidos de otros", (await customers()).length === 0);
+  await page.evaluate(() => {
+    window.location.hash = "/cluster";
+  });
+  await sleep(400);
+  check(
+    "Una ruta de administrador escrita a mano no se abre para el cliente",
+    (await currentRoute()) === "pedidos" && !(await exists(".cluster")) && (await page.evaluate(() => window.location.hash)) === "#/pedidos",
+  );
   check("El cliente no ve controles de caos ni de bases de datos", !(await page.$$eval("button", (bs) => bs.some((b) => /Simular|Restaurar|Sincronizar/.test(b.textContent)))));
+  await go("nuevo");
   check("El formulario propone el nombre del cliente", (await page.$eval(".order-form .field input", (i) => i.value)) === "Camila Rojas");
   await fillOrder("", [["Sillas plegables", 6, 22.5]]);
   await submitNewOrder();
+  await go("pedidos");
+  await page.waitForSelector("tbody .customer");
   const clientRows = await customers();
   check("El cliente crea un pedido y sólo ve el suyo", clientRows.length === 1 && clientRows[0] === "Camila Rojas", clientRows.join(" | "));
   check("El cliente no puede avanzar estados (sin botón →)", !(await page.$$eval("tbody button", (bs) => bs.some((b) => b.textContent.startsWith("→")))));
   check("El cliente puede cancelar su pedido pendiente", await page.$$eval("tbody button", (bs) => bs.some((b) => b.textContent === "Cancelar pedido")));
   await sleep(500);
   await shot("10_vista_cliente.png");
+  await go("conexion");
+  check("Mi conexión: muestra el nodo que atendió la última petición", /Nodo-(Alpha-01|Beta-02)/.test(await text(".last-request .node-chip")));
+  check(
+    "Mi conexión: topología con el recorrido de la petición (sin datos internos del clúster)",
+    (await exists(".topology--client")) && (await exists('.topo-edge.is-path[data-edge="clients-gateway"]')) && !(await exists(".topo-node.topo-up")),
+  );
+  await sleep(1200);
+  await shot("14_mi_conexion.png");
 
   // ------------------------------------------------------------------ vista móvil (cliente)
+  await go("pedidos");
   await page.setViewport({ width: 390, height: 844, isMobile: true, deviceScaleFactor: 2 });
-  await sleep(1500);
+  await page.waitForSelector('main.content[data-route="pedidos"] tbody .customer');
+  await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 });
   await page.evaluate(() => {
     document.querySelectorAll(".toast .icon-btn").forEach((b) => b.click());
     window.scrollTo(0, 0);
   });
   await sleep(300);
+  check("Vista móvil sin desplazamiento horizontal", await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
   await page.screenshot({ path: path.join(OUT, "09_vista_movil.png") });
   console.log("      📸 09_vista_movil.png");
 
   // ------------------------------------------------------------------ administración de datos (admin)
+  // Cambiar isMobile hace que Puppeteer recargue la página: se espera a que la app termine de arrancar
+  // (sus primeras peticiones) antes de cerrar sesión.
   await page.setViewport({ width: 1440, height: 1000 });
+  await page.waitForSelector(".role-badge");
+  await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 });
   await clickButton("Cerrar sesión");
   await page.waitForSelector(".login-card");
   await fillLogin(ADMIN_USER, ADMIN_PASSWORD);
   await clickButton("Entrar", ".login-card");
   await page.waitForSelector(".role-badge");
-  await clickButton("Administración", ".tabs");
+  await go("usuarios");
   const clientRow = `tr[data-username="${clientUser}"]`;
   await page.waitForSelector(clientRow, { timeout: 10000 });
   const clientOrders = await page.$eval(`${clientRow} td.num`, (td) => td.textContent.trim());
-  check("Administración: lista de usuarios con sus pedidos", clientOrders === "1", `${clientUser}: ${clientOrders} pedido(s)`);
+  check("Usuarios: lista de usuarios con sus pedidos", clientOrders === "1", `${clientUser}: ${clientOrders} pedido(s)`);
   const selfButtons = await page.$$eval(`tr[data-username="${ADMIN_USER}"] button`, (bs) =>
     bs.filter((b) => /Desactivar|Eliminar/.test(b.textContent)).map((b) => b.disabled),
   );
-  check("Administración: el admin no puede desactivarse ni eliminarse", selfButtons.length === 2 && selfButtons.every(Boolean));
+  check("Usuarios: el admin no puede desactivarse ni eliminarse", selfButtons.length === 2 && selfButtons.every(Boolean));
 
   const clickInSelector = (selector, label) =>
     page.evaluate(
@@ -454,14 +573,14 @@ try {
   await nameInput.type("Camila Rojas Pérez");
   await clickButton("Guardar cambios", ".dialog");
   await page.waitForFunction((sel) => document.querySelector(sel)?.textContent.includes("Camila Rojas Pérez"), { timeout: 10000 }, clientRow);
-  check("Administración: editar el nombre de un usuario", true);
+  check("Usuarios: editar el nombre de un usuario", true);
   await clickInSelector(clientRow, "Desactivar");
   await page.waitForFunction((sel) => document.querySelector(sel)?.textContent.includes("Desactivada"), { timeout: 10000 }, clientRow);
-  check("Administración: desactivar una cuenta", true);
+  check("Usuarios: desactivar una cuenta", true);
   await sleep(400);
   await shot("12_administracion_usuarios.png");
 
-  await clickButton("Pedidos", ".admin-views");
+  await go("correcciones");
   const deliveredRow = 'tr[data-customer="María Fernanda López"]';
   await page.waitForSelector(deliveredRow, { timeout: 10000 });
   await clickInSelector(deliveredRow, "Corregir");
@@ -469,21 +588,21 @@ try {
   await page.select(".dialog select", "enviado");
   await clickButton("Guardar corrección", ".dialog");
   await page.waitForFunction((sel) => document.querySelector(`${sel} .status`)?.textContent === "Enviado", { timeout: 10000 }, deliveredRow);
-  check("Administración: corrección de un pedido entregado (estado hacia atrás)", true);
+  check("Correcciones: un pedido entregado puede volver a un estado anterior", true);
   const deletedRow = 'tr[data-customer="Pedido con nodo caído"]';
   await page.waitForSelector(deletedRow, { timeout: 10000 });
   await clickInSelector(deletedRow, "Restaurar");
   await page.waitForFunction((sel) => !document.querySelector(sel)?.classList.contains("row-deleted"), { timeout: 10000 }, deletedRow);
-  check("Administración: restaurar un pedido eliminado", true);
+  check("Correcciones: restaurar un pedido eliminado", true);
 
-  await clickButton("Auditoría", ".admin-views");
+  await go("auditoria");
   await page.waitForFunction(() => document.querySelectorAll(".audit-table tbody tr").length > 5, { timeout: 10000 });
   const auditActions = await page.$$eval(".audit-table tbody tr", (rows) =>
     rows.map((r) => `${r.children[1].textContent}|${r.children[2].textContent}`),
   );
   const expected = ["admin|Restauró pedido", "admin|Corrección admin", "admin|Desactivó cuenta", "admin|Editó usuario", `${clientUser}|Creó pedido`, `${clientUser}|Registro`];
   check(
-    "Administración: la auditoría registra quién hizo cada cambio",
+    "Auditoría: registra quién hizo cada cambio",
     expected.every((e) => auditActions.includes(e)),
     `${auditActions.length} registros`,
   );

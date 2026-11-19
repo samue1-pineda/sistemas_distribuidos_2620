@@ -1,29 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, onApiEvent } from "./api.js";
-import ClusterPanel from "./components/ClusterPanel.jsx";
-import AdminPanel from "./components/AdminPanel.jsx";
-import MonitoringPanel from "./components/MonitoringPanel.jsx";
+import Dialog from "./components/Dialog.jsx";
+import Icon from "./components/Icons.jsx";
 import OrderForm from "./components/OrderForm.jsx";
-import OrdersTable from "./components/OrdersTable.jsx";
-import RequestLog from "./components/RequestLog.jsx";
+import Sidebar from "./components/Sidebar.jsx";
 import Toasts from "./components/Toasts.jsx";
 import { STATUS_LABELS, dbLabel, shortId } from "./format.js";
+import { useHashRoute } from "./navigation.js";
+import { AuditoriaPage, CorreccionesPage, UsuariosPage } from "./pages/AdminPages.jsx";
+import { ConexionPage, NuevoPedidoPage, PedidosPage, ResumenPage } from "./pages/OperacionPages.jsx";
+import { ClusterPage, MonitoreoPage } from "./pages/SistemaPages.jsx";
 
 const POLL_MS = 3000;
 const LOG_SIZE = 30;
+// Secciones que muestran el estado del clúster (sólo en ellas se consulta cada 3 s).
+const CLUSTER_ROUTES = new Set(["resumen", "cluster"]);
 
 export default function Dashboard({ user, onLogout }) {
   const isAdmin = user.role === "admin";
-  // Pestañas del administrador; el hash (#monitoreo, #administracion) permite enlazar directamente.
-  const TABS = ["operacion", "monitoreo", "administracion"];
-  const [tab, setTab] = useState(() => {
-    const fromHash = window.location.hash.slice(1);
-    return isAdmin && TABS.includes(fromHash) ? fromHash : "operacion";
-  });
-  const selectTab = (next) => {
-    setTab(next);
-    window.history.replaceState(null, "", next === "operacion" ? window.location.pathname : `#${next}`);
-  };
+  const [route, navigate] = useHashRoute(user.role);
+  const routeRef = useRef(route);
+  routeRef.current = route;
+
   const [orders, setOrders] = useState([]);
   const [ordersState, setOrdersState] = useState({ loading: true, error: null, dbUsed: null });
   const [cluster, setCluster] = useState(null);
@@ -63,7 +61,7 @@ export default function Dashboard({ user, onLogout }) {
     [dismiss],
   );
 
-  // Cada respuesta de la API actualiza el panel "Última petición" y el registro.
+  // Cada respuesta de la API actualiza "Última petición", la topología y el registro.
   useEffect(
     () =>
       onApiEvent((meta) => {
@@ -96,10 +94,10 @@ export default function Dashboard({ user, onLogout }) {
       setOrdersState((s) => ({ ...s, loading: false, error: error.message }));
       throw error;
     }
-  }, []);
+  }, [applyList]);
 
   const refreshCluster = useCallback(async () => {
-    if (!isAdmin || document.location.hash) return; // sólo admin, y sólo en la pestaña "Operación"
+    if (!isAdmin || !CLUSTER_ROUTES.has(routeRef.current)) return;
     const [status, repl] = await Promise.allSettled([api.clusterStatus(), api.replicationStatus()]);
     if (status.status === "fulfilled") setCluster(status.value.data);
     if (repl.status === "fulfilled") setReplication(repl.value.data);
@@ -107,12 +105,17 @@ export default function Dashboard({ user, onLogout }) {
 
   useEffect(() => {
     loadOrders().catch(() => {});
-    refreshCluster();
     const timer = setInterval(() => {
       if (!document.hidden) refreshCluster();
     }, POLL_MS);
     return () => clearInterval(timer);
   }, [loadOrders, refreshCluster]);
+
+  // Al entrar a una sección se refrescan sus datos (silenciosamente).
+  useEffect(() => {
+    if (CLUSTER_ROUTES.has(route)) refreshCluster();
+    if (route === "pedidos" || route === "resumen") loadOrders({ silent: true }).catch(() => {});
+  }, [route, refreshCluster, loadOrders]);
 
   // Las respuestas de escritura no traen owner_username: se conserva el que ya conocíamos.
   const upsertLocal = (order) =>
@@ -205,11 +208,11 @@ export default function Dashboard({ user, onLogout }) {
           notify("warn", "db-primary caída (simulado) en todo el clúster: lecturas y escrituras van a db-replica");
         } else {
           const tables = data.sync?.tables ?? {};
-          const orders = tables.orders?.copied_to_primary ?? 0;
+          const restored = tables.orders?.copied_to_primary ?? 0;
           const auditRows = tables.audit_log?.copied_to_primary ?? 0;
           notify(
             "success",
-            `db-primary restaurada · reconciliación: ${orders} pedido(s) y ${auditRows} registro(s) de auditoría copiados réplica → primaria`,
+            `db-primary restaurada · reconciliación: ${restored} pedido(s) y ${auditRows} registro(s) de auditoría copiados réplica → primaria`,
           );
         }
         loadOrders({ silent: true }).catch(() => {});
@@ -254,6 +257,49 @@ export default function Dashboard({ user, onLogout }) {
       }
     });
 
+  // ------------------------------------------------------------------ secciones
+  const clusterDown =
+    cluster && (cluster.nodes.some((n) => !n.reachable || n.simulate_crash) || cluster.databases?.primary?.status !== "up");
+  const badges = { pedidos: orders.length, ...(isAdmin && clusterDown ? { cluster: "!" } : {}) };
+  const clearLog = () => setLog([]);
+  const chaos = {
+    lastRequest, cluster, replication, handled, pending, balance,
+    onToggleNode: toggleNode, onToggleDb: toggleDb, onSync: syncNow, onTestBalancing: testBalancing,
+  };
+
+  let page;
+  switch (route) {
+    case "resumen":
+      page = <ResumenPage cluster={cluster} replication={replication} orders={orders} lastRequest={lastRequest} handled={handled} onNavigate={navigate} />;
+      break;
+    case "nuevo":
+      page = <NuevoPedidoPage isAdmin={isAdmin} user={user} busy={pending.form} onCreate={createOrder} lastRequest={lastRequest} onNavigate={navigate} />;
+      break;
+    case "conexion":
+      page = <ConexionPage lastRequest={lastRequest} log={log} onClearLog={clearLog} />;
+      break;
+    case "cluster":
+      page = <ClusterPage chaos={chaos} log={log} onClearLog={clearLog} />;
+      break;
+    case "monitoreo":
+      page = <MonitoreoPage />;
+      break;
+    case "usuarios":
+      page = <UsuariosPage currentUser={user} notify={notify} />;
+      break;
+    case "correcciones":
+      page = <CorreccionesPage notify={notify} />;
+      break;
+    case "auditoria":
+      page = <AuditoriaPage />;
+      break;
+    default:
+      page = (
+        <PedidosPage isAdmin={isAdmin} orders={orders} ordersState={ordersState} pending={pending}
+                     onAdvance={advanceOrder} onEdit={setEditing} onDelete={deleteOrder} onRefresh={refreshOrders} onNavigate={navigate} />
+      );
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -266,7 +312,11 @@ export default function Dashboard({ user, onLogout }) {
         </div>
         <div className="topbar-right">
           <span className={`gateway-pill ${gatewayUp ? "up" : "down"}`}>
-            <span className="dot" /> Gateway NGINX {gatewayUp ? "conectado" : "sin backends"}
+            <span className="dot" />
+            <span>
+              <span className="gateway-label">Gateway NGINX </span>
+              {gatewayUp ? "conectado" : "sin backends"}
+            </span>
           </span>
           {isAdmin && (
             <a className="topbar-link" href="/api/docs" target="_blank" rel="noreferrer">
@@ -278,75 +328,23 @@ export default function Dashboard({ user, onLogout }) {
             <span className={`role-badge role-${user.role}`}>{isAdmin ? "Administrador" : "Cliente"}</span>
           </span>
           <button type="button" className="topbar-link topbar-button" onClick={onLogout}>
-            Cerrar sesión
+            <Icon name="logout" size={15} /> Cerrar sesión
           </button>
         </div>
       </header>
 
-      <main className="container">
-        {isAdmin && (
-          <nav className="tabs" role="tablist" aria-label="Secciones del panel">
-            <button type="button" role="tab" aria-selected={tab === "operacion"} className={tab === "operacion" ? "tab active" : "tab"} onClick={() => selectTab("operacion")}>
-              Operación
-            </button>
-            <button type="button" role="tab" aria-selected={tab === "monitoreo"} className={tab === "monitoreo" ? "tab active" : "tab"} onClick={() => selectTab("monitoreo")}>
-              Monitoreo
-            </button>
-            <button type="button" role="tab" aria-selected={tab === "administracion"} className={tab === "administracion" ? "tab active" : "tab"} onClick={() => selectTab("administracion")}>
-              Administración
-            </button>
-          </nav>
-        )}
-        {tab === "monitoreo" ? (
-          <MonitoringPanel />
-        ) : tab === "administracion" ? (
-          <AdminPanel currentUser={user} notify={notify} />
-        ) : (
-          <>
-        <ClusterPanel
-          isAdmin={isAdmin}
-          lastRequest={lastRequest}
-          cluster={cluster}
-          replication={replication}
-          handled={handled}
-          pending={pending}
-          balance={balance}
-          onToggleNode={toggleNode}
-          onToggleDb={toggleDb}
-          onSync={syncNow}
-          onTestBalancing={testBalancing}
-        />
+      <div className="shell">
+        <Sidebar role={user.role} route={route} onNavigate={navigate} badges={badges} />
+        <main className="content" data-route={route}>
+          {page}
+        </main>
+      </div>
 
-        <div className="workspace">
-          <OrderForm
-            defaultCustomer={isAdmin ? "" : user.full_name}
-            editing={editing}
-            busy={pending.form}
-            onCreate={createOrder}
-            onUpdate={updateOrder}
-            onCancelEdit={() => setEditing(null)}
-          />
-          <OrdersTable
-            isAdmin={isAdmin}
-            orders={orders}
-            state={ordersState}
-            pending={pending}
-            editingId={editing?.id}
-            onAdvance={advanceOrder}
-            onEdit={setEditing}
-            onDelete={deleteOrder}
-            onRefresh={refreshOrders}
-          />
-        </div>
-
-        <RequestLog entries={log} onClear={() => setLog([])} />
-          </>
-        )}
-      </main>
-
-      <footer className="footer muted">
-        React 18 + Vite · NGINX (Round-Robin + failover) · FastAPI ×2 · PostgreSQL 16 primaria + réplica
-      </footer>
+      {editing && (
+        <Dialog title={`Editar pedido #${shortId(editing.id)}`} onClose={() => setEditing(null)}>
+          <OrderForm editing={editing} busy={pending.form} onUpdate={updateOrder} onCancelEdit={() => setEditing(null)} embedded />
+        </Dialog>
+      )}
       <Toasts toasts={toasts} onDismiss={dismiss} />
     </div>
   );

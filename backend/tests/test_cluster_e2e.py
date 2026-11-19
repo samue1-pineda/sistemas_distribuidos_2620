@@ -36,6 +36,26 @@ def _reset(http: httpx.Client) -> None:
     time.sleep(0.5)
 
 
+def _hit_both_nodes(http: httpx.Client, path: str, headers: dict, expected_status: int, check=None) -> set[str]:
+    """Repite la petición hasta que la hayan atendido AMBOS nodos (todas con el estado esperado).
+
+    NGINX excluye durante ``fail_timeout`` (10 s) a un nodo que falló, aunque ya se haya restaurado; si
+    un test anterior lo "tumbó" hace menos de 10 s, al principio sólo responde el otro. Por eso no basta
+    con un número fijo de peticiones (en CI la suite es más rápida y caía dentro de esa ventana).
+    """
+    seen: set[str] = set()
+    deadline = time.monotonic() + 20
+    while seen != NODES and time.monotonic() < deadline:
+        response = http.get(path, headers=headers)
+        assert response.status_code == expected_status, response.text
+        if check:
+            check(response)
+        seen.add(response.headers["X-Handled-By-Node"])
+        if seen != NODES:
+            time.sleep(0.5)
+    return seen
+
+
 @pytest.fixture
 def http():
     with httpx.Client(base_url=BASE_URL, timeout=15) as client:
@@ -57,11 +77,11 @@ def test_e2e_sesion_valida_en_ambos_nodos_y_sin_reintentos_en_401(http):
     assert registered.status_code == 201, registered.text
     user_headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
 
-    seen = set()
-    for _ in range(6):  # el mismo token, validado por ambos nodos sin estado compartido
-        me = http.get("/api/auth/me", headers=user_headers)
-        assert me.status_code == 200 and me.json()["user"]["username"] == username
-        seen.add(me.headers["X-Handled-By-Node"])
+    # El mismo token, validado por ambos nodos sin estado compartido.
+    seen = _hit_both_nodes(
+        http, "/api/auth/me", user_headers, 200,
+        check=lambda me: me.json()["user"]["username"] == username or pytest.fail(me.text),
+    )
     assert seen == NODES
 
     anonymous = http.get("/api/orders", headers={"Authorization": ""})
@@ -174,12 +194,7 @@ def test_e2e_administracion_revoca_sesiones_en_ambos_nodos_y_audita(http):
     off = http.patch(f"/api/admin/users/{user_id}", json={"is_active": False})
     assert off.status_code == 200 and off.json()["replication"] == "synced"
     # Ningún nodo acepta ya su token: la sesión se revoca sin estado compartido entre nodos.
-    seen = set()
-    for _ in range(4):
-        response = http.get("/api/orders", headers=user_headers)
-        assert response.status_code == 401
-        seen.add(response.headers["X-Handled-By-Node"])
-    assert seen == NODES
+    assert _hit_both_nodes(http, "/api/orders", user_headers, 401) == NODES
 
     actions = [e["action"] for e in http.get("/api/admin/audit", params={"entity_id": user_id}).json()["data"]]
     assert actions == ["user.deactivate", "user.register"]

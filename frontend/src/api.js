@@ -1,5 +1,5 @@
 // Cliente de la API. SIEMPRE usa rutas relativas (/api/...): el gateway NGINX las balancea.
-import { getToken } from "./auth.js";
+import { getToken, sessionClosedHere } from "./auth.js";
 
 const listeners = new Set();
 const unauthorizedListeners = new Set();
@@ -61,6 +61,15 @@ async function request(method, path, { body, silent = false, auth = true } = {})
   const headers = {};
   if (body) headers["Content-Type"] = "application/json";
   const token = auth ? getToken() : null;
+  if (auth && !token) {
+    // Sin token no tiene sentido llamar al servidor para recibir un 401. Si la sesión se cerró en esta pestaña
+    // (p. ej. una petición que arrancó justo al pulsar "Cerrar sesión") la app ya está en el login; si caducó
+    // o la cerró otra pestaña, se avisa para volver al login.
+    const meta = { id: ++sequence, at: new Date(), method, path, silent, status: 401, ok: false, node: null, dbUsed: null,
+                   replication: null, upstreamStatus: null, durationMs: 0 };
+    if (!sessionClosedHere()) unauthorizedListeners.forEach((listener) => listener("la sesión expiró o se cerró en otra pestaña"));
+    throw new ApiError("No hay una sesión activa", 401, meta, null);
+  }
   if (token) headers.Authorization = `Bearer ${token}`;
   try {
     response = await fetch(path, {

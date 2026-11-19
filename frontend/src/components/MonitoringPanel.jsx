@@ -290,13 +290,7 @@ export default function MonitoringPanel() {
   const degraded = summary && summary.nodes_up < summary.nodes_total;
 
   return (
-    <section className={`monitoring ${loading && data ? "is-refreshing" : ""}`} aria-labelledby="monitoring-title">
-      <div className="section-head">
-        <h2 id="monitoring-title">Monitoreo de nodos</h2>
-        <span className="muted">
-          {data ? `Reportado por ${data.reporter} · ${formatClock(data.generated_at * 1000)}` : "Cargando…"}
-        </span>
-      </div>
+    <section className={`monitoring ${loading && data ? "is-refreshing" : ""}`} aria-label="Monitoreo de nodos">
 
       <div className="filter-row">
         <div className="chips" role="tablist" aria-label="Rango de tiempo">
@@ -316,7 +310,10 @@ export default function MonitoringPanel() {
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPaused((p) => !p)} aria-pressed={paused}>
           {paused ? "▶ Reanudar actualización" : "❚❚ Pausar actualización"}
         </button>
-        <span className="muted small">{paused ? "En pausa" : "Se actualiza cada 3 s"}</span>
+        <span className="muted small">
+          {paused ? "En pausa" : "Se actualiza cada 3 s"}
+          {data ? ` · reportado por ${data.reporter} a las ${formatClock(data.generated_at * 1000)}` : " · cargando…"}
+        </span>
       </div>
 
       {error && <p className="form-error">No se pudo obtener el monitoreo: {error}</p>}

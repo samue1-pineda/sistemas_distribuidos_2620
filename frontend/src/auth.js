@@ -2,6 +2,12 @@
 // Se guarda en localStorage para sobrevivir a recargas; el backend vuelve a validar el usuario en
 // cada petición, así que una cuenta desactivada pierde el acceso aunque el token siga guardado.
 const KEY = "pedidos.session";
+// true cuando la sesión se cerró en ESTA pestaña (la app ya volvió al login); false si caducó o la cerró otra pestaña.
+let closedHere = false;
+
+export function sessionClosedHere() {
+  return closedHere;
+}
 
 export function loadSession() {
   try {
@@ -19,6 +25,7 @@ export function loadSession() {
 
 export function saveSession({ access_token: token, expires_in: expiresIn, user }) {
   const session = { token, user, expiresAt: Date.now() + expiresIn * 1000 };
+  closedHere = false;
   try {
     localStorage.setItem(KEY, JSON.stringify(session));
   } catch {
@@ -28,6 +35,7 @@ export function saveSession({ access_token: token, expires_in: expiresIn, user }
 }
 
 export function clearSession() {
+  closedHere = true;
   try {
     localStorage.removeItem(KEY);
   } catch {

@@ -67,7 +67,7 @@ export default function OrdersTable({ orders, state, pending, onAdvance, onEdit,
   return (
     <section className="card orders" aria-labelledby="orders-title">
       <header className="card-head">
-        <h3 id="orders-title">{isAdmin ? "Pedidos (todos los clientes)" : "Mis pedidos"}</h3>
+        <h3 id="orders-title">{isAdmin ? "Todos los clientes" : "Tus pedidos"}</h3>
         <div className="orders-tools">
           <span className="muted small">
             Leído desde <DbChip dbUsed={state.dbUsed} />

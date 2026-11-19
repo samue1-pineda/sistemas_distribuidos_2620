@@ -21,7 +21,7 @@ function validate(form) {
   return null;
 }
 
-export default function OrderForm({ editing, busy, onCreate, onUpdate, onCancelEdit, defaultCustomer = "" }) {
+export default function OrderForm({ editing, busy, onCreate, onUpdate, onCancelEdit, defaultCustomer = "", embedded = false }) {
   const blank = () => ({ customer_name: defaultCustomer, items: [emptyItem()] });
   const [form, setForm] = useState(blank);
   const [error, setError] = useState(null);
@@ -68,15 +68,17 @@ export default function OrderForm({ editing, busy, onCreate, onUpdate, onCancelE
   };
 
   return (
-    <form className="card order-form" onSubmit={submit} noValidate>
-      <header className="card-head">
-        <h3>{editing ? `Editar pedido #${shortId(editing.id)}` : "Nuevo pedido"}</h3>
-        {editing && (
-          <button type="button" className="btn btn-link" onClick={onCancelEdit}>
-            Cancelar
-          </button>
-        )}
-      </header>
+    <form className={`order-form ${embedded ? "order-form--embedded" : "card"}`} onSubmit={submit} noValidate>
+      {!embedded && (
+        <header className="card-head">
+          <h3>{editing ? `Editar pedido #${shortId(editing.id)}` : "Datos del pedido"}</h3>
+          {editing && (
+            <button type="button" className="btn btn-link" onClick={onCancelEdit}>
+              Cancelar
+            </button>
+          )}
+        </header>
+      )}
 
       <label className="field">
         <span>Cliente</span>

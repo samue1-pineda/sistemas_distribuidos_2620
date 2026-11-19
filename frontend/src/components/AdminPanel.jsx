@@ -4,12 +4,6 @@ import { STATUSES, STATUS_LABELS, dbLabel, formatDateTime, formatMoney, formatNu
 import { NodeChip } from "./ClusterPanel.jsx";
 import Dialog from "./Dialog.jsx";
 
-const VIEWS = [
-  { key: "users", label: "Usuarios" },
-  { key: "orders", label: "Pedidos" },
-  { key: "audit", label: "Auditoría" },
-];
-
 const ACTION_LABELS = {
   "order.create": "Creó pedido",
   "order.update": "Editó pedido",
@@ -288,7 +282,7 @@ function EditOrderDialog({ order, onClose, onSaved, notify }) {
 }
 
 // ---------------------------------------------------------------------- vistas
-function UsersView({ currentUserId, notify, onChanged, reloadKey }) {
+export function UsersView({ currentUserId, notify, onChanged, reloadKey }) {
   const [filters, setFilters] = useState({ search: "", role: "", status: "" });
   const [rows, setRows] = useState([]);
   const [error, setError] = useState(null);
@@ -402,7 +396,7 @@ function UsersView({ currentUserId, notify, onChanged, reloadKey }) {
   );
 }
 
-function OrdersView({ notify, onChanged, reloadKey }) {
+export function OrdersView({ notify, onChanged, reloadKey }) {
   const [filters, setFilters] = useState({ search: "", status: "", include_deleted: true });
   const [rows, setRows] = useState([]);
   const [error, setError] = useState(null);
@@ -511,7 +505,7 @@ function OrdersView({ notify, onChanged, reloadKey }) {
   );
 }
 
-function AuditView({ reloadKey }) {
+export function AuditView({ reloadKey }) {
   const [filters, setFilters] = useState({ entity: "", actor: "" });
   const [rows, setRows] = useState([]);
   const [error, setError] = useState(null);
@@ -571,78 +565,5 @@ function AuditView({ reloadKey }) {
         </table>
       </div>
     </>
-  );
-}
-
-// ---------------------------------------------------------------------- panel
-export default function AdminPanel({ currentUser, notify }) {
-  const [view, setView] = useState("users");
-  const [summary, setSummary] = useState(null);
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    api
-      .adminSummary()
-      .then(({ data }) => setSummary(data.data))
-      .catch((err) => notify("error", `No se pudo cargar el resumen: ${err.message}`));
-  }, [reloadKey, notify]);
-
-  const onChanged = useCallback(() => setReloadKey((k) => k + 1), []);
-
-  return (
-    <section className="admin" aria-labelledby="admin-title">
-      <div className="section-head">
-        <h2 id="admin-title">Administración de datos</h2>
-        <span className="muted">Cada cambio queda en la auditoría y se replica en ambas bases</span>
-      </div>
-
-      {summary && (
-        <div className="stat-row">
-          <div className="stat-tile">
-            <span className="stat-label">Usuarios activos</span>
-            <span className="stat-value">{formatNumber(summary.users_active)} / {formatNumber(summary.users_total)}</span>
-            <span className="stat-hint muted">{formatNumber(summary.admins)} administrador(es)</span>
-          </div>
-          <div className="stat-tile">
-            <span className="stat-label">Pedidos activos</span>
-            <span className="stat-value">{formatNumber(summary.orders_active)}</span>
-            <span className="stat-hint muted">{formatNumber(summary.orders_by_status.pendiente)} pendiente(s)</span>
-          </div>
-          <div className="stat-tile">
-            <span className="stat-label">En proceso · enviados</span>
-            <span className="stat-value">{formatNumber(summary.orders_by_status["en proceso"])} · {formatNumber(summary.orders_by_status.enviado)}</span>
-            <span className="stat-hint muted">{formatNumber(summary.orders_by_status.entregado)} entregado(s)</span>
-          </div>
-          <div className="stat-tile">
-            <span className="stat-label">Pedidos eliminados</span>
-            <span className="stat-value">{formatNumber(summary.orders_deleted)}</span>
-            <span className="stat-hint muted">recuperables (borrado lógico)</span>
-          </div>
-          <div className="stat-tile">
-            <span className="stat-label">Cuentas eliminadas</span>
-            <span className="stat-value">{formatNumber(summary.users_deleted)}</span>
-            <span className="stat-hint muted">anonimizadas</span>
-          </div>
-          <div className="stat-tile">
-            <span className="stat-label">Registros de auditoría</span>
-            <span className="stat-value">{formatNumber(summary.audit_entries)}</span>
-            <span className="stat-hint muted">quién cambió qué</span>
-          </div>
-        </div>
-      )}
-
-      <div className="card">
-        <div className="chips admin-views" role="tablist" aria-label="Sección de administración">
-          {VIEWS.map((v) => (
-            <button key={v.key} type="button" role="tab" aria-selected={view === v.key} className={`chip ${view === v.key ? "chip-active" : ""}`} onClick={() => setView(v.key)}>
-              {v.label}
-            </button>
-          ))}
-        </div>
-        {view === "users" && <UsersView currentUserId={currentUser.id} notify={notify} onChanged={onChanged} reloadKey={reloadKey} />}
-        {view === "orders" && <OrdersView notify={notify} onChanged={onChanged} reloadKey={reloadKey} />}
-        {view === "audit" && <AuditView reloadKey={reloadKey} />}
-      </div>
-    </section>
   );
 }
